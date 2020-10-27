@@ -41,8 +41,13 @@ extern "C" {
 #if defined(__clang__)
 #define INPUT_FORMAT "" //TODO
 #elif defined(__GNUC__) || defined(__GNUG__)
+#ifdef __MINGW32__
+#define INPUT_FORMAT "gdigrab"
+#define INPUT_URL "desktop"
+#else
 #define INPUT_URL ":0.0"
 #define INPUT_FORMAT "x11grab"
+#endif
 #elif defined(_MSC_VER)
 #define INPUT_FORMAT "gdigrab"
 #define INPUT_URL "desktop"
@@ -323,6 +328,7 @@ int _run(struct DesktopCapture *dc) {
   struct SDL_Thread *eventLoopThread = NULL;
   do {
     // find input format
+    printf("INPUT_FORMAT:%s\n", INPUT_FORMAT);
     if (NULL == (inputFmt = av_find_input_format(INPUT_FORMAT))) {
       ec = ERR_AV_FIND_INPUT_FORMAT;
       break;
