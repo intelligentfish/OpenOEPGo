@@ -1,4 +1,4 @@
-target=agent
+target=openOEP
 $(target):	main.go
 	go build
 clean:

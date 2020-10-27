@@ -1,6 +1,6 @@
 package main
 
-// #cgo LDFLAGS: -lavdevice -lavcodec -lavformat -lavutil -lswscale -lx265
+// #cgo LDFLAGS: -lavdevice -lavcodec -lavformat -lavutil -lswscale -lx265 -lSDL2
 /*
 #define __STDC_CONSTANT_MACROS
 #include <stdio.h>
@@ -16,6 +16,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libswresample/swresample.h>
 #include <x265.h>
+#include <SDL2/SDL.h>
 #ifdef __cplusplus
 }
 #endif
@@ -80,6 +81,7 @@ struct DesktopCapture {
                     uint32_t sizeBytes,
                     uint8_t *payload);
   int (*run)(struct DesktopCapture *dc);
+  void (*onYUVFrame)(struct DesktopCapture *dc, struct AVFrame *frame);
   void (*stop)(struct DesktopCapture *dc);
 
   int _stop;
@@ -92,6 +94,10 @@ struct DesktopCapture {
   struct x265_encoder *_x265Encoder;
   struct x265_picture *_x265Picture;
   struct x265_nal *_x265Nal;
+  const char *_windowTitle;
+  struct SDL_Window *_previewWindow;
+  struct SDL_Renderer *_previewRenderer;
+  struct SDL_Texture *_previewTexture;
 };
 
 // create
@@ -101,19 +107,29 @@ int _create(struct DesktopCapture *dc,
             int dstHeight,
             enum AVPixelFormat dstFmt,
             OnX265Nal onX265Nal) {
+  int ec = 0;
   SHOW_MODULE_INFO(avdevice);
   SHOW_MODULE_INFO(avcodec);
   SHOW_MODULE_INFO(avformat);
   SHOW_MODULE_INFO(avutil);
   dc->_stop = 0;
   dc->_videoIndex = -1;
+  dc->_dstPixelFmt = dstFmt;
   dc->_dstWidth = dstWidth;
   dc->_dstHeight = dstHeight;
   dc->_frameRate = frameRate;
   dc->_x265Nal = NULL;
   dc->onX265Nal = onX265Nal;
   dc->_fmtCtx = avformat_alloc_context();
+  dc->_windowTitle = "desktop preview";
+  dc->_previewWindow = NULL;
+  dc->_previewRenderer = NULL;
+  dc->_previewTexture = NULL;
   if (NULL == dc->_fmtCtx) return ERR_AVFORMAT_ALLOC_CONTEXT;
+  if (ec = SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) {
+    fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
+    return ec;
+  }
   avdevice_register_all();
   return 0;
 }
@@ -123,6 +139,9 @@ void _destroy(struct DesktopCapture *dc) {
   if (dc->_fmtCtx) avformat_free_context(dc->_fmtCtx);
   if (dc->_x265Encoder) x265_encoder_close(dc->_x265Encoder);
   x265_cleanup();
+  if (dc->_previewTexture) SDL_DestroyTexture(dc->_previewTexture);
+  if (dc->_previewRenderer) SDL_DestroyRenderer(dc->_previewRenderer);
+  if (dc->_previewWindow) SDL_DestroyWindow(dc->_previewWindow);
 }
 
 // show error message
@@ -145,7 +164,7 @@ int _x265setup(struct DesktopCapture *dc,
   param->fpsNum = dc->_frameRate;
   param->fpsDenom = 1;
   param->logLevel = X265_LOG_NONE;
-  //param->frameNumThreads = 1;  // 限制CPU使用率
+  param->frameNumThreads = 1;  // 限制CPU使用率
   // auto ret = x265_param_apply_profile(x265Param, x265_profile_names[1]);
   // if (0 > ret) LOG(ERROR) << "x265_param_apply_profile error:" << ret;
   dc->_x265Encoder = x265_encoder_open(param);
@@ -232,12 +251,27 @@ int _x265Flush(struct DesktopCapture *dc) {
   return 0;
 }
 
+// eventLoop
+int _eventLoop(void *dc) {
+  union SDL_Event e;
+  while (1) {
+    if (SDL_PollEvent(&e)) {
+      switch (e.type) {
+        // close preview window
+        case SDL_QUIT:((struct DesktopCapture *) dc)->_stop = 1;
+          return 0;
+      }
+    }
+  }
+  return 0;
+}
+
 // run
 int _run(struct DesktopCapture *dc) {
   int ec = 0;
   AVInputFormat *inputFmt = NULL;
   char frameRateBuf[8];
-  const char* inputURL = NULL;
+  const char *inputURL = NULL;
   AVDictionary *dict = NULL;
   int i = 0;
   AVCodecParameters *codecpar = NULL;
@@ -251,6 +285,7 @@ int _run(struct DesktopCapture *dc) {
   int height = 0;
   struct AVPacket *packet = NULL;
   struct AVFrame *frameDesktop = NULL;
+  struct SDL_Thread *eventLoopThread = NULL;
   do {
     // find input format
     if (NULL == (inputFmt = av_find_input_format(INPUT_FORMAT))) {
@@ -344,6 +379,32 @@ int _run(struct DesktopCapture *dc) {
 #elif defined(USE_X265)
     if (0 != (ec = dc->x265Setup(dc, dstWidth, dstHeight))) break;
 #endif
+    // show preview window
+    if (!(dc->_previewWindow = SDL_CreateWindow(dc->_windowTitle,
+                                                SDL_WINDOWPOS_CENTERED,
+                                                SDL_WINDOWPOS_CENTERED,
+                                                ctx3->width,
+                                                ctx3->height,
+                                                SDL_WINDOW_OPENGL))) {
+      fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
+      break;
+    }
+    if (!(dc->_previewRenderer = SDL_CreateRenderer(dc->_previewWindow,
+                                                    -1,
+                                                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC))) {
+      fprintf(stderr, "SDL_CreateRenderer error: %s\n", SDL_GetError());
+      break;
+    }
+    if (!(dc->_previewTexture = SDL_CreateTexture(dc->_previewRenderer,
+                                                  SDL_PIXELFORMAT_YV12,
+                                                  SDL_TEXTUREACCESS_TARGET,
+                                                  ctx3->width,
+                                                  ctx3->height))) {
+      fprintf(stderr, "SDL_CreateTexture error: %s\n", SDL_GetError());
+      break;
+    }
+    eventLoopThread = SDL_CreateThread(_eventLoop, "event_loop", dc);
+    //
     while (!dc->_stop) {
       if (0 > (ec = av_read_frame(dc->_fmtCtx, packet))) {
         dc->shoErrorMessage(AVERROR(ec));
@@ -362,6 +423,7 @@ int _run(struct DesktopCapture *dc) {
 #if defined(USE_X264)
           //TODO
 #elif defined(USE_X265)
+          dc->onYUVFrame(dc, frameYUV);
           dc->x265Encode(dc, frameYUV, X265_CSP_I420, dstWidth);
 #endif
         }
@@ -385,13 +447,35 @@ int _run(struct DesktopCapture *dc) {
     if (frameDesktop) av_frame_free(&frameDesktop);
     if (frameYUV) av_frame_free(&frameYUV);
     if (packet) av_free(packet);
+    SDL_WaitThread(eventLoopThread, NULL);
   } while (0);
   return ec;
 }
 
+// onYUVFrame
+void _onYUVFrame(struct DesktopCapture *dc, struct AVFrame *frame) {
+  if (0 > SDL_UpdateYUVTexture(dc->_previewTexture,
+                               NULL,
+                               frame->data[0],
+                               frame->linesize[0],
+                               frame->data[1],
+                               frame->linesize[1],
+                               frame->data[2],
+                               frame->linesize[2])) {
+    fprintf(stderr, "SDL_UpdateYUVTexture error: %s\n", SDL_GetError());
+  } else {
+    SDL_RenderClear(dc->_previewRenderer);
+    SDL_RenderCopy(dc->_previewRenderer, dc->_previewTexture, NULL, NULL);
+    SDL_RenderPresent(dc->_previewRenderer);
+  }
+}
+
 // stop
 void _stop(struct DesktopCapture *dc) {
-	dc->_stop = 1;
+  union SDL_Event e;
+  e.type = SDL_QUIT;
+  SDL_PushEvent(&e);
+  dc->_stop = 1;
 }
 
 // makeDesktopCapture
@@ -405,6 +489,7 @@ struct DesktopCapture makeDesktopCapture() {
   dc.x265Flush = _x265Flush;
   dc.run = _run;
   dc.stop = _stop;
+  dc.onYUVFrame = _onYUVFrame;
   return dc;
 }
 
@@ -442,7 +527,14 @@ import (
 )
 
 func main() {
+	// watch os signal
+	sigCh := make(chan os.Signal, 16)
+	signal.Notify(sigCh)
+
+	// wait group
 	var wg sync.WaitGroup
+
+	// define and start workers
 	workers := []func(){
 		func() {
 			// capture desktop
@@ -458,25 +550,30 @@ func main() {
 			// push stream
 			defer wg.Done()
 			for nal := range singleton.X265Queue {
-				fmt.Printf("%d,%d,%p\n", nal.Type, nal.Size, nal.Payload)
+				_ = nal
+				// fmt.Printf("%d,%d,%p\n", nal.Type, nal.Size, nal.Payload)
 				// push push push
 			}
+			sigCh <- os.Kill
 		},
 	}
 	wg.Add(len(workers))
 	for _, worker := range workers {
 		go worker()
 	}
-	sigCh := make(chan os.Signal, 16)
-	signal.Notify(sigCh)
+
+	// wait for os signal
+sigLoop:
 	for sig := range sigCh {
 		fmt.Println(sig)
 		switch sig {
 		case os.Kill, os.Interrupt:
 			C.stopCapture()
 			signal.Stop(sigCh)
-			close(sigCh)
+			break sigLoop
 		}
 	}
+
+	// wait all workers done
 	wg.Wait()
 }
