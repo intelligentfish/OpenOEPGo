@@ -4,8 +4,8 @@ import "C"
 import (
 	"unsafe"
 
-	"agent/singleton"
-	"agent/types"
+	"openOEP/singleton"
+	"openOEP/types"
 )
 
 //X265Nal callback

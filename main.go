@@ -236,6 +236,8 @@ int _x265Flush(struct DesktopCapture *dc) {
 int _run(struct DesktopCapture *dc) {
   int ec = 0;
   AVInputFormat *inputFmt = NULL;
+  char frameRateBuf[8];
+  const char* inputURL = NULL;
   AVDictionary *dict = NULL;
   int i = 0;
   AVCodecParameters *codecpar = NULL;
@@ -256,14 +258,23 @@ int _run(struct DesktopCapture *dc) {
       break;
     }
     // set frame rate
-    char frameRateBuf[8];
     frameRateBuf[sprintf(frameRateBuf, "%d", dc->_frameRate)] = 0;
     av_dict_set(&dict, "framerate", frameRateBuf, 0);
-    if (0 > (ec = avformat_open_input(&dc->_fmtCtx, INPUT_URL, inputFmt, &dict))) {
-      dc->shoErrorMessage(AVERROR(ec));
-      ec = ERR_AVFORMAT_OPEN_INPUT;
-      break;
+    inputURL = INPUT_URL;
+    for (i = 0; i < 2; i++) {
+      ec = 0;
+      if (0 > (ec = avformat_open_input(&dc->_fmtCtx, inputURL, inputFmt, &dict))) {
+        dc->shoErrorMessage(AVERROR(ec));
+        ec = ERR_AVFORMAT_OPEN_INPUT;
+#if defined(__GNUC__) || defined(__GNUG__)
+        inputURL = getenv("DISPLAY");
+        printf("display: %s\n", inputURL);
+#else
+        break;
+#endif
+      } else break;
     }
+    if (ec) return ec;
     if (0 > (ec = avformat_find_stream_info(dc->_fmtCtx, NULL))) {
       dc->shoErrorMessage(AVERROR(ec));
       ec = ERR_AVFORMAT_FIND_STREAM_INFO;
@@ -427,7 +438,7 @@ import (
 	"os/signal"
 	"sync"
 
-	"agent/singleton"
+	"openOEP/singleton"
 )
 
 func main() {

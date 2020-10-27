@@ -1,3 +1,3 @@
-module agent
+module openOEP
 
 go 1.15
