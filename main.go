@@ -137,6 +137,7 @@ int _create(struct DesktopCapture *dc) {
 // destrory
 void _destroy(struct DesktopCapture *dc) {
   if (dc->_fmtCtx) avformat_free_context(dc->_fmtCtx);
+  if (dc->_x265Picture) x265_picture_free(dc->_x265Picture);
   if (dc->_x265Encoder) x265_encoder_close(dc->_x265Encoder);
   x265_cleanup();
   if (dc->_previewTexture) SDL_DestroyTexture(dc->_previewTexture);
@@ -259,8 +260,8 @@ int _x265Encode(struct DesktopCapture *dc,
     return ec;
   }
   for (i = 0; i < nalNumber; i++)
-    if (dc->onX265Nal)
-      dc->onX265Nal(dc->_x265Nal[i].type,
+    if (dc->_onX265Nal)
+      dc->_onX265Nal(dc->_x265Nal[i].type,
                     dc->_x265Nal[i].sizeBytes,
                     dc->_x265Nal[i].payload);
   return 0;
@@ -280,8 +281,8 @@ int _x265Flush(struct DesktopCapture *dc) {
     if (0 > ec)
       return ec;
     for (i = 0; i < nalNumber; i++)
-      if (dc->onX265Nal)
-        dc->onX265Nal(dc->_x265Nal[i].type,
+      if (dc->_onX265Nal)
+        dc->_onX265Nal(dc->_x265Nal[i].type,
                       dc->_x265Nal[i].sizeBytes,
                       dc->_x265Nal[i].payload);
   }
@@ -592,6 +593,18 @@ import (
 	"openOEP/singleton"
 )
 
+const (
+	NALUTypeVPS = 32 // VPS
+	NALUTypeSPS = 33 // SPS
+	NALUTypePPS = 34 // PPS
+)
+
+var (
+	vps []byte // VPS
+	sps []byte // SPS
+	pps []byte // PPS
+)
+
 func main() {
 	// watch os signal
 	sigCh := make(chan os.Signal, 16)
@@ -620,8 +633,19 @@ func main() {
 			// push stream
 			defer wg.Done()
 			for nal := range singleton.X265Queue {
-				_ = nal
-				// fmt.Printf("%d,%d,%p\n", nal.Type, nal.Size, nal.Payload)
+				switch nal.Type {
+				case NALUTypeVPS:
+					vps = nal.Payload
+					fmt.Println("--VPS--")
+				case NALUTypeSPS:
+					sps = nal.Payload
+					fmt.Println("--SPS--")
+				case NALUTypePPS:
+					pps = nal.Payload
+					fmt.Println("--PPS--")
+				default:
+					//fmt.Printf("%d,%d,%p\n", nal.Type, nal.Size, nal.Payload)
+				}
 				// push push push
 			}
 			sigCh <- os.Interrupt
