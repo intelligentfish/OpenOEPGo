@@ -1,0 +1,20 @@
+syntax = "proto3";
+option go_package = "pb";
+message Request{
+  enum RequestType {
+    Unknown = 0;
+    NALU = 1;
+  }
+  RequestType requestType = 1;
+  bytes body = 2;
+}
+message NALRequest {
+  enum NALType {
+    Other = 0;
+    VPS = 1;
+    PPS = 2;
+    SPS = 3;
+  }
+  NALType nalType = 1;
+  bytes body = 2;
+}
